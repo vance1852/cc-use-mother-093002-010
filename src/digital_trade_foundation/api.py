@@ -9,8 +9,127 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .errors import DomainError, ValidationError
+from .negotiation import NegotiationService
 from .service import DomainService
 from .storage import Database
+
+
+def _receipt_response(receipt) -> tuple[int, dict[str, Any]]:
+    return (200 if receipt.replayed else 201), receipt.__dict__
+
+
+def _route_negotiation(service: NegotiationService, method: str, segments: list[str],
+                       query: dict[str, list[str]], body: dict[str, Any],
+                       actor_id: str) -> tuple[int, dict[str, Any]] | None:
+    """分派规则文本协商与承诺跟踪接口。"""
+
+    if method == "POST" and segments == ["dialogues"]:
+        return _receipt_response(service.create_dialogue(actor_id=actor_id, **body))
+    if len(segments) >= 2 and segments[0] == "dialogues":
+        dialogue_id = segments[1]
+        if method == "POST" and len(segments) == 3 and segments[2] == "delegations":
+            return _receipt_response(service.enroll_delegation(
+                actor_id=actor_id, dialogue_id=dialogue_id, **body))
+        if method == "POST" and len(segments) == 3 and segments[2] == "grants":
+            return _receipt_response(service.grant_speaking(
+                actor_id=actor_id, dialogue_id=dialogue_id, **body))
+        if method == "POST" and len(segments) == 3 and segments[2] == "statements":
+            return _receipt_response(service.add_statement(
+                actor_id=actor_id, dialogue_id=dialogue_id, **body))
+        if method == "POST" and len(segments) == 3 and segments[2] == "proposals":
+            return _receipt_response(service.create_proposal(
+                actor_id=actor_id, dialogue_id=dialogue_id, **body))
+        if method == "POST" and len(segments) == 3 and segments[2] == "seals":
+            return _receipt_response(service.seal_session(
+                actor_id=actor_id, dialogue_id=dialogue_id, **body))
+        if method == "POST" and len(segments) == 3 and segments[2] == "actions":
+            return _receipt_response(service.create_action(
+                actor_id=actor_id, dialogue_id=dialogue_id, **body))
+        if method == "GET" and len(segments) == 3 and segments[2] == "actions":
+            status = query.get("status", [None])[0]
+            return 200, {"items": service.list_actions(dialogue_id, status)}
+        if method == "POST" and len(segments) == 3 and segments[2] == "coi":
+            return _receipt_response(service.declare_coi(
+                actor_id=actor_id, dialogue_id=dialogue_id, **body))
+        if method == "GET" and len(segments) == 3 and segments[2] == "public":
+            return 200, service.public_view(dialogue_id)
+        if method == "GET" and len(segments) == 3 and segments[2] == "view":
+            if not actor_id:
+                raise ValidationError("X-Actor-Id 不能为空")
+            return 200, service.dialogue_view(actor_id=actor_id, dialogue_id=dialogue_id)
+        if method == "GET" and len(segments) == 3 and segments[2] == "commitments":
+            return 200, {"items": service.list_commitments(dialogue_id)}
+    if method == "POST" and len(segments) == 3 and segments[0] == "grants" \
+            and segments[2] == "revoke":
+        return _receipt_response(service.revoke_speaking(actor_id=actor_id,
+                                                         grant_id=segments[1], **body))
+    if method == "POST" and len(segments) == 3 and segments[0] == "proposals" \
+            and segments[2] == "clauses":
+        return _receipt_response(service.add_clause(actor_id=actor_id,
+                                                    proposal_id=segments[1], **body))
+    if len(segments) >= 2 and segments[0] == "clauses":
+        clause_id = segments[1]
+        if method == "GET" and len(segments) == 2:
+            return 200, service.get_clause(clause_id)
+        if method == "POST" and len(segments) == 3 and segments[2] == "amendments":
+            return _receipt_response(service.propose_amendment(
+                actor_id=actor_id, clause_id=clause_id, **body))
+        if method == "GET" and len(segments) == 3 and segments[2] == "binding":
+            delegation_id = query.get("delegation_id", [""])[0]
+            at = query.get("at", [""])[0]
+            if not delegation_id or not at:
+                raise ValidationError("delegation_id 和 at 不能为空")
+            return 200, service.explain_binding(clause_id=clause_id,
+                                                delegation_id=delegation_id, at=at)
+    if len(segments) >= 2 and segments[0] == "amendments":
+        amendment_id = segments[1]
+        if method == "POST" and len(segments) == 3 and segments[2] == "seconds":
+            return _receipt_response(service.second_amendment(
+                actor_id=actor_id, amendment_id=amendment_id, **body))
+        if method == "POST" and len(segments) == 3 and segments[2] == "withdraw":
+            return _receipt_response(service.withdraw_amendment(
+                actor_id=actor_id, amendment_id=amendment_id, **body))
+        if method == "POST" and len(segments) == 3 and segments[2] == "merge":
+            return _receipt_response(service.merge_amendment(
+                actor_id=actor_id, amendment_id=amendment_id, **body))
+    if len(segments) >= 2 and segments[0] == "versions":
+        version_id = segments[1]
+        if method == "POST" and len(segments) == 3 and segments[2] == "translations":
+            return _receipt_response(service.submit_translation(
+                actor_id=actor_id, version_id=version_id, **body))
+        if method == "POST" and len(segments) == 3 and segments[2] == "positions":
+            return _receipt_response(service.cast_position(
+                actor_id=actor_id, version_id=version_id, **body))
+        if method == "POST" and len(segments) == 3 and segments[2] == "consensus":
+            return _receipt_response(service.form_consensus(
+                actor_id=actor_id, version_id=version_id, **body))
+        if method == "GET" and len(segments) == 3 and segments[2] == "tally":
+            return 200, service.tally(version_id)
+    if method == "POST" and len(segments) == 3 and segments[0] == "translations" \
+            and segments[2] == "verify":
+        return _receipt_response(service.verify_translation(
+            actor_id=actor_id, translation_id=segments[1], **body))
+    if method == "POST" and len(segments) == 3 and segments[0] == "statements" \
+            and segments[2] == "revisions":
+        return _receipt_response(service.revise_statement(
+            actor_id=actor_id, statement_id=segments[1], **body))
+    if method == "POST" and len(segments) == 5 and segments[0] == "commitments" \
+            and segments[2] == "conditions" and segments[4] == "fulfill":
+        return _receipt_response(service.fulfill_condition(
+            actor_id=actor_id, commitment_id=segments[1], seq=int(segments[3]), **body))
+    if method == "GET" and len(segments) == 2 and segments[0] == "commitments":
+        return 200, service.get_commitment(segments[1])
+    if method == "POST" and len(segments) == 3 and segments[0] == "actions" \
+            and segments[2] == "complete":
+        return _receipt_response(service.complete_action(actor_id=actor_id,
+                                                         action_id=segments[1], **body))
+    if method == "POST" and len(segments) == 3 and segments[0] == "coi" \
+            and segments[2] == "clear":
+        return _receipt_response(service.clear_coi(actor_id=actor_id,
+                                                   declaration_id=segments[1], **body))
+    if method == "GET" and len(segments) == 2 and segments[0] == "seals":
+        return 200, service.verify_seal(segments[1])
+    return None
 
 
 def route(service: DomainService, method: str, path: str, body: dict[str, Any] | None,
@@ -48,6 +167,12 @@ def route(service: DomainService, method: str, path: str, body: dict[str, Any] |
             query = parse_qs(parsed.query)
             after = int(query.get("after_sequence", ["0"])[0])
             return 200, {"items": service.audit_events(after)}
+        segments = [segment for segment in parsed.path.split("/") if segment]
+        if isinstance(service, NegotiationService):
+            negotiated = _route_negotiation(service, method, segments,
+                                            parse_qs(parsed.query), body, actor_id)
+            if negotiated is not None:
+                return negotiated
         return 404, {"error": "route_not_found", "message": "接口不存在"}
     except DomainError as exc:
         return exc.status, {"error": exc.code, "message": str(exc)}
@@ -99,7 +224,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
     database = Database(args.database)
-    Handler.service = DomainService(database)
+    Handler.service = NegotiationService(database)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     try:
         server.serve_forever()
